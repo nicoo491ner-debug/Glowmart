@@ -1,0 +1,34 @@
+-- GlowMart schema. Run in Supabase SQL editor.
+create table profiles(id uuid primary key references auth.users on delete cascade,full_name text,phone text,role text not null default 'customer' check(role in('customer','seller','admin')),suspended bool default false,created_at timestamptz default now());
+create table settings(id int primary key default 1,commission_pct numeric default 10,delivery_fee int default 200);insert into settings default values;
+create table categories(id serial primary key,name text unique,parent_id int references categories(id));
+create table stores(id uuid primary key default gen_random_uuid(),owner_id uuid references profiles(id),name text,description text,logo_url text,status text default 'pending' check(status in('pending','approved','rejected','suspended')));
+create table products(id uuid primary key default gen_random_uuid(),store_id uuid references stores(id) on delete cascade,category_id int references categories(id),name text,description text,price int,old_price int,stock int default 0,image_url text,featured bool default false,status text default 'pending' check(status in('pending','approved','rejected')),created_at timestamptz default now());
+create table addresses(id uuid primary key default gen_random_uuid(),user_id uuid references profiles(id),location text,address text,notes text);
+create table cart_items(user_id uuid references profiles(id),product_id uuid references products(id),qty int,primary key(user_id,product_id));
+create table wishlists(user_id uuid references profiles(id),product_id uuid references products(id),primary key(user_id,product_id));
+create table orders(id uuid primary key default gen_random_uuid(),customer_id uuid references profiles(id),name text,phone text,email text,location text,address text,notes text,subtotal int,delivery_fee int,total int,status text default 'placed' check(status in('placed','confirmed','processing','shipped','out_for_delivery','delivered')),created_at timestamptz default now());
+create table order_items(id uuid primary key default gen_random_uuid(),order_id uuid references orders(id) on delete cascade,product_id uuid references products(id),store_id uuid references stores(id),qty int,unit_price int,commission int,seller_payout int);
+create table payments(id uuid primary key default gen_random_uuid(),order_id uuid references orders(id),method text default 'mpesa',amount int,mpesa_receipt text,status text default 'pending',created_at timestamptz default now());
+create table reviews(id uuid primary key default gen_random_uuid(),product_id uuid references products(id),user_id uuid references profiles(id),rating int check(rating between 1 and 5),body text,verified bool default false,created_at timestamptz default now());
+create table banners(id serial primary key,title text,image_url text,link text,active bool default true);
+create function is_admin() returns bool language sql security definer as $$select exists(select 1 from profiles where id=auth.uid() and role='admin')$$;
+do $$ declare t text; begin foreach t in array array['profiles','settings','categories','stores','products','addresses','cart_items','wishlists','orders','order_items','payments','reviews','banners'] loop execute format('alter table %I enable row level security',t); end loop; end $$;
+create policy "read approved products" on products for select using(status='approved' or is_admin() or store_id in(select id from stores where owner_id=auth.uid()));
+create policy "seller manages own products" on products for all using(store_id in(select id from stores where owner_id=auth.uid())) with check(store_id in(select id from stores where owner_id=auth.uid()));
+create policy "admin all products" on products for all using(is_admin());
+create policy "read stores" on stores for select using(status='approved' or owner_id=auth.uid() or is_admin());
+create policy "seller own store" on stores for all using(owner_id=auth.uid()) with check(owner_id=auth.uid());
+create policy "admin stores" on stores for all using(is_admin());
+create policy "own profile" on profiles for select using(id=auth.uid() or is_admin());
+create policy "update own profile" on profiles for update using(id=auth.uid()) with check(role=(select role from profiles where id=auth.uid()));
+create policy "public read" on categories for select using(true);create policy "public read" on settings for select using(true);create policy "public read" on banners for select using(true);
+create policy "admin categories" on categories for all using(is_admin());create policy "admin settings" on settings for all using(is_admin());create policy "admin banners" on banners for all using(is_admin());
+create policy "own addresses" on addresses for all using(user_id=auth.uid());create policy "own cart" on cart_items for all using(user_id=auth.uid());create policy "own wishlist" on wishlists for all using(user_id=auth.uid());
+create policy "customer orders" on orders for select using(customer_id=auth.uid() or is_admin());
+create policy "customer creates order" on orders for insert with check(customer_id=auth.uid());
+create policy "seller sees order items" on order_items for select using(store_id in(select id from stores where owner_id=auth.uid()) or is_admin() or order_id in(select id from orders where customer_id=auth.uid()));
+create policy "seller sees their orders" on orders for select using(id in(select order_id from order_items where store_id in(select id from stores where owner_id=auth.uid())));
+create policy "read reviews" on reviews for select using(true);create policy "write own review" on reviews for insert with check(user_id=auth.uid());
+create policy "own payments" on payments for select using(order_id in(select id from orders where customer_id=auth.uid()) or is_admin());
+-- Commission must be computed server-side (RPC/edge function) from settings.commission_pct when an order is placed. Create storage buckets: store-logos, product-images.
